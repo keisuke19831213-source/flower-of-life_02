@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flower of Life – MAX</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    /* ビューポートの短辺に合わせた正方形 */
+    #viz { width: 100vmin; height: 100vmin; }
+    svg  { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <!-- D3.js v7 CDN（インターネット接続が必要） -->
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <div id="viz"></div>
+
+  <script>
+  // ======================================================
+  //  Flower of Life ── MAX VERSION
+  //  D3.js v7 / index.html 1ファイル構成
+  //
+  //  見どころ:
+  //    ・3リング 計37個の円
+  //    ・ダブルグロー（tight + wide の2段階ブルーム）
+  //    ・半透明フィル → 円の重なりでペタルが黄金に光る
+  //    ・内外2枚のヘキサグラム（六芒星）が逆回転
+  //    ・呼吸 × 時計回り × 逆回転の3重アニメーション
+  //    ・リングごとに位相をずらした「光の波」リップル
+  //    ・深宇宙グラデーション背景
+  // ======================================================
+
+  // ── 基本設定 ──────────────────────────────────────────
+  const W     = 600;
+  const H     = 600;
+  const CX    = W / 2;   // 中心 X = 300
+  const CY    = H / 2;   // 中心 Y = 300
+  const R     = 52;      // 1つの円の半径（3リングが600pxに収まるサイズ）
+  const GOLD  = "#FFD700";
+  const RINGS = 3;       // リング数（3 → 37個の円）
+
+  // ── SVG 作成（viewBox で仮想座標を定義） ──────────────
+  const svg = d3.select("#viz").append("svg")
+    .attr("viewBox", `0 0 ${W} ${H}`)
+    .attr("preserveAspectRatio", "xMidYMid meet");
+
+  const defs = svg.append("defs");
+
+  // ── 背景グラデーション: 深宇宙 ─────────────────────────
+  // 暗い藍紫 → 漆黒 のラジアルグラデーション
+  const bgGrad = defs.append("radialGradient")
+    .attr("id", "bg-grad")
+    .attr("cx", "50%").attr("cy", "50%").attr("r", "50%");
+  bgGrad.append("stop")
+    .attr("offset", "0%").attr("stop-color", "#0d0920");   // 深い藍紫
+  bgGrad.append("stop")
+    .attr("offset", "60%").attr("stop-color", "#050308");  // ほぼ黒
+  bgGrad.append("stop")
+    .attr("offset", "100%").attr("stop-color", "#000000"); // 漆黒
+
+  // ── グロー フィルター: 2段階ブルーム ───────────────────
+  //  tight(3px) → シャープな内輪
+  //  wide(10px) → やわらかな外輪
+  //  → feMerge で重ねて幻想的なグロー
+  const fGlow = defs.append("filter")
+    .attr("id", "glow")
+    .attr("x", "-60%").attr("y", "-60%")
+    .attr("width", "220%").attr("height", "220%");
+  // タイトで鋭いグロー
+  fGlow.append("feGaussianBlur")
+    .attr("in", "SourceGraphic").attr("stdDeviation", "3").attr("result", "b1");
+  // 広域のやわらかいグロー
+  fGlow.append("feGaussianBlur")
+    .attr("in", "SourceGraphic").attr("stdDeviation", "10").attr("result", "b2");
+  // 合成: 外グロー → 内グロー → オリジナルの順に重ねる
+  const fMerge = fGlow.append("feMerge");
+  fMerge.append("feMergeNode").attr("in", "b2");
+  fMerge.append("feMergeNode").attr("in", "b1");
+  fMerge.append("feMergeNode").attr("in", "SourceGraphic");
+
+  // 超広域ハロー（中心の光点専用）
+  const fHalo = defs.append("filter")
+    .attr("id", "halo")
+    .attr("x", "-300%").attr("y", "-300%")
+    .attr("width", "700%").attr("height", "700%");
+  fHalo.append("feGaussianBlur")
+    .attr("in", "SourceGraphic").attr("stdDeviation", "18").attr("result", "hb");
+  const hMerge = fHalo.append("feMerge");
+  hMerge.append("feMergeNode").attr("in", "hb");
+  hMerge.append("feMergeNode").attr("in", "SourceGraphic");
+
+  // ── 背景 ───────────────────────────────────────────────
+  svg.append("rect")
+    .attr("width", W).attr("height", H)
+    .attr("fill", "url(#bg-grad)");
+
+  // ── ヘックス格子: 全円の中心座標を生成 ─────────────────
+  //  アクシャル座標 (q, s) → ユークリッド座標 (x, y)
+  //    x = r × (q + s × 0.5)
+  //    y = r × s × (√3 / 2)
+  //  ring: 中心からの六角格子距離（0,1,2,3...）
+  function genHex(maxRings, r) {
+    const pts = [];
+    for (let q = -maxRings; q <= maxRings; q++) {
+      const sMin = Math.max(-maxRings, -q - maxRings);
+      const sMax = Math.min(maxRings,  -q + maxRings);
+      for (let s = sMin; s <= sMax; s++) {
+        pts.push({
+          x:    r * (q + s * 0.5),
+          y:    r * s * (Math.sqrt(3) / 2),
+          ring: Math.max(Math.abs(q), Math.abs(s), Math.abs(q + s))
+        });
+      }
+    }
+    return pts;
+  }
+
+  const positions = genHex(RINGS, R); // 37個
+
+  // ── グループ階層 ────────────────────────────────────────
+  //  centerGroup  → translate(300,300) で中心へ移動（静的）
+  //    rotateGroup  → 時計回り回転専用（d3.timerで更新）
+  //      breatheGroup → スケール呼吸専用（D3 transitionで更新）
+  const centerGroup  = svg.append("g")
+    .attr("transform", `translate(${CX}, ${CY})`);
+  const rotateGroup  = centerGroup.append("g");
+  const breatheGroup = rotateGroup.append("g")
+    .attr("transform", "scale(1)");
+
+  // ── Layer 1: グロー用ぼかし円 ─────────────────────────
+  //  同じ円をぼかしてブルームの土台にする
+  const glowLayer = breatheGroup.append("g")
+    .attr("filter", "url(#glow)")
+    .attr("opacity", 0.45);
+  glowLayer.selectAll("circle").data(positions).join("circle")
+    .attr("cx", d => d.x).attr("cy", d => d.y).attr("r", R)
+    .attr("fill", "none")
+    .attr("stroke", GOLD)
+    .attr("stroke-width", 1.5);
+
+  // ── Layer 2: 半透明フィル（重なりでペタルが発光） ───────
+  //  各円に fill opacity 0.048 をかける
+  //  重なる部分では opacity が蓄積 → 中心は最も明るくなる
+  //  （例: 7枚重なり → 0.048 × 7 ≈ 0.34 のゴールド）
+  const fillLayer = breatheGroup.append("g");
+  fillLayer.selectAll("circle").data(positions).join("circle")
+    .attr("cx", d => d.x).attr("cy", d => d.y).attr("r", R)
+    .attr("fill", "rgba(255, 200, 50, 0.048)")
+    .attr("stroke", "none");
+
+  // ── Layer 3: クリスプな金ライン（リング単位でグループ化） ─
+  //  グループごとに opacity を変えてリップル → 37→4要素の更新
+  const lineLayer = breatheGroup.append("g");
+  const ringGroups = d3.range(RINGS + 1).map(() => lineLayer.append("g"));
+  positions.forEach(d => {
+    ringGroups[d.ring].append("circle")
+      .attr("cx", d.x).attr("cy", d.y).attr("r", R)
+      .attr("fill", "none")
+      .attr("stroke", GOLD)
+      .attr("stroke-width", d.ring === 0 ? 1.5 : 1);
+  });
+
+  // ── 外周境界円 ──────────────────────────────────────────
+  const boundaryR = (RINGS + 1) * R; // 最外リング+1円分の半径
+  breatheGroup.append("circle")
+    .attr("r", boundaryR)
+    .attr("fill", "none")
+    .attr("stroke", "rgba(255,215,0,0.3)")
+    .attr("stroke-width", 1)
+    .attr("filter", "url(#glow)");
+
+  // ── 逆回転グループ: ヘキサグラム（六芒星）─────────────
+  //  rotateGroup が角度 +A 回転するとき、
+  //  counterGroup が -2A 回転すると
+  //  絶対角度 = A + (-2A) = -A （逆回転・同速）
+  //  → 円が時計回り、星が反時計回りに回る
+  const counterGroup = breatheGroup.append("g");
+
+  function triPts(offsetDeg, radius) {
+    return [0, 1, 2].map(i => {
+      const θ = (i * 120 + offsetDeg) * Math.PI / 180;
+      return `${radius * Math.cos(θ)},${radius * Math.sin(θ)}`;
+    }).join(" ");
+  }
+
+  // 内側六芒星（2R）: 白ライン
+  const hexR1 = 2 * R;
+  counterGroup.append("polygon")
+    .attr("points", triPts(90,  hexR1))
+    .attr("fill", "none")
+    .attr("stroke", "rgba(255,255,255,0.55)")
+    .attr("stroke-width", 0.8)
+    .attr("filter", "url(#glow)");
+  counterGroup.append("polygon")
+    .attr("points", triPts(-90, hexR1))
+    .attr("fill", "none")
+    .attr("stroke", "rgba(255,255,255,0.55)")
+    .attr("stroke-width", 0.8)
+    .attr("filter", "url(#glow)");
+
+  // 外側六芒星（3R）: 金ライン
+  const hexR2 = 3 * R;
+  counterGroup.append("polygon")
+    .attr("points", triPts(90,  hexR2))
+    .attr("fill", "none")
+    .attr("stroke", "rgba(255,215,0,0.45)")
+    .attr("stroke-width", 0.7)
+    .attr("filter", "url(#glow)");
+  counterGroup.append("polygon")
+    .attr("points", triPts(-90, hexR2))
+    .attr("fill", "none")
+    .attr("stroke", "rgba(255,215,0,0.45)")
+    .attr("stroke-width", 0.7)
+    .attr("filter", "url(#glow)");
+
+  // ── 中心の光点 ──────────────────────────────────────────
+  // 広域ハロー（背景の薄い光暈）
+  breatheGroup.append("circle")
+    .attr("r", 28)
+    .attr("fill", "rgba(255, 210, 80, 0.18)")
+    .attr("filter", "url(#halo)");
+  // 白い中心点（グロー付き）
+  breatheGroup.append("circle")
+    .attr("r", 3.5)
+    .attr("fill", "white")
+    .attr("opacity", 0.95)
+    .attr("filter", "url(#glow)");
+
+  // ── タイトル（SVG直下 → 回転・スケールの影響なし） ────
+  svg.append("text")
+    .attr("x", W - 16).attr("y", 28)
+    .attr("text-anchor", "end")
+    .attr("fill", "white")
+    .attr("font-family", "'Helvetica Neue', Arial, sans-serif")
+    .attr("font-size", "15px").attr("letter-spacing", "3px")
+    .attr("opacity", 0.75)
+    .text("Flower of Life");
+  svg.append("text")
+    .attr("x", W - 16).attr("y", 46)
+    .attr("text-anchor", "end")
+    .attr("fill", GOLD)
+    .attr("font-family", "'Helvetica Neue', Arial, sans-serif")
+    .attr("font-size", "9px").attr("letter-spacing", "5px")
+    .attr("opacity", 0.5)
+    .text("SACRED GEOMETRY");
+
+  // ======================================================
+  //  アニメーション: 3重構造
+  //    ① 呼吸    D3 transition: scale 1.0 ↔ 1.05（4秒サイクル）
+  //    ② 回転    d3.timer:      時計回り 60秒/周
+  //    ③ リップル d3.timer:      リングごとに位相をずらした透明度波
+  //               + 逆回転       ヘキサグラムが反時計回り
+  // ======================================================
+
+  // ① 呼吸（D3 transition）
+  function breathe() {
+    breatheGroup
+      .transition().duration(4000).ease(d3.easeSinInOut)
+      .attr("transform", "scale(1.05)")
+      .transition().duration(4000).ease(d3.easeSinInOut)
+      .attr("transform", "scale(1.0)")
+      .on("end", breathe);
+  }
+  breathe();
+
+  // ② 回転 & ③ リップル（d3.timer）
+  d3.timer(elapsed => {
+    const t     = elapsed / 1000;          // 経過秒
+    const angle = (elapsed / 60000) * 360; // 60秒で360° = 1周
+
+    // 全体を時計回りに回転
+    rotateGroup.attr("transform", `rotate(${angle})`);
+
+    // ヘキサグラムを反時計回りに逆回転
+    //  絶対角度 = +angle（rotateGroup）+ (-2×angle) = -angle
+    counterGroup.attr("transform", `rotate(${-2 * angle})`);
+
+    // リングごとに位相をずらした透明度リップル
+    //  ring=0(中心) が最初に光り、ring=3(外側) が遅れて光る
+    //  → 中心 → 外側へ光の波が広がるように見える
+    ringGroups.forEach((g, ring) => {
+      const phase   = ring * (Math.PI / 2);  // リング間の位相差 = 90°
+      const opacity = 0.15 + 0.55 * (0.5 + 0.5 * Math.sin(t * (Math.PI / 4) - phase));
+      g.attr("opacity", opacity);            // 0.15 〜 0.70 の範囲
+    });
+  });
+  </script>
+</body>
+</html>
